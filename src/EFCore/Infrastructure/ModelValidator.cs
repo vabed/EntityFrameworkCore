@@ -303,7 +303,8 @@ namespace Microsoft.EntityFrameworkCore.Infrastructure
                         throw new InvalidOperationException(CoreStrings.OwnedDerivedType(entityType.DisplayName()));
                     }
 
-                    foreach (var referencingFk in entityType.GetReferencingForeignKeys().Where(fk => !fk.IsOwnership))
+                    foreach (var referencingFk in entityType.GetReferencingForeignKeys().Where(fk => !fk.IsOwnership
+                        && fk.DeclaringEntityType.FindOwnership()?.PrincipalEntityType.IsAssignableFrom(fk.PrincipalEntityType) != true))
                     {
                         throw new InvalidOperationException(
                             CoreStrings.PrincipalOwnedType(
@@ -318,7 +319,8 @@ namespace Microsoft.EntityFrameworkCore.Infrastructure
                                 entityType.DisplayName()));
                     }
 
-                    foreach (var fk in entityType.GetDeclaredForeignKeys().Where(fk => !fk.IsOwnership && fk.PrincipalToDependent != null))
+                    foreach (var fk in entityType.GetDeclaredForeignKeys().Where(fk => !fk.IsOwnership && fk.PrincipalToDependent != null
+                        && fk.DeclaringEntityType.FindOwnership()?.PrincipalEntityType.IsAssignableFrom(fk.PrincipalEntityType) != true))
                     {
                         throw new InvalidOperationException(
                             CoreStrings.InverseToOwnedType(

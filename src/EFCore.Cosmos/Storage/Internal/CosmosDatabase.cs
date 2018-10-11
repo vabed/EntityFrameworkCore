@@ -1,18 +1,22 @@
 ﻿// Copyright (c) .NET Foundation. All rights reserved.
 // Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
 
+using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.EntityFrameworkCore.ChangeTracking.Internal;
+using Microsoft.EntityFrameworkCore.Cosmos.Internal;
 using Microsoft.EntityFrameworkCore.Cosmos.Metadata.Conventions.Internal;
 using Microsoft.EntityFrameworkCore.Cosmos.Metadata.Internal;
 using Microsoft.EntityFrameworkCore.Cosmos.Update.Internal;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.EntityFrameworkCore.Metadata;
 using Microsoft.EntityFrameworkCore.Metadata.Internal;
 using Microsoft.EntityFrameworkCore.Storage;
 using Microsoft.EntityFrameworkCore.Update;
+using Microsoft.EntityFrameworkCore.Update.Internal;
 using Newtonsoft.Json.Linq;
 
 namespace Microsoft.EntityFrameworkCore.Cosmos.Storage.Internal
@@ -22,13 +26,20 @@ namespace Microsoft.EntityFrameworkCore.Cosmos.Storage.Internal
         private readonly Dictionary<IEntityType, DocumentSource> _documentCollections
             = new Dictionary<IEntityType, DocumentSource>();
         private readonly CosmosClient _cosmosClient;
+        private readonly bool _sensitiveLoggingEnabled;
 
         public CosmosDatabase(
             DatabaseDependencies dependencies,
-            CosmosClient cosmosClient)
+            CosmosClient cosmosClient,
+            ILoggingOptions loggingOptions)
             : base(dependencies)
         {
             _cosmosClient = cosmosClient;
+
+            if (loggingOptions.IsSensitiveDataLoggingEnabled)
+            {
+                _sensitiveLoggingEnabled = true;
+            }
         }
 
         public override int SaveChanges(IReadOnlyList<IUpdateEntry> entries)
@@ -48,9 +59,11 @@ namespace Microsoft.EntityFrameworkCore.Cosmos.Storage.Internal
                 if (!entityType.IsDocumentRoot())
                 {
                     var root = GetRootDocument((InternalEntityEntry)entry);
-                    if (!entriesSaved.Contains(root))
+                    if (!entriesSaved.Contains(root)
+                        && rootEntriesToSave.Add(root)
+                        && root.EntityState == EntityState.Unchanged)
                     {
-                        rootEntriesToSave.Add(root);
+                        ((InternalEntityEntry)root).SetEntityState(EntityState.Modified);
                     }
                     continue;
                 }
@@ -94,10 +107,6 @@ namespace Microsoft.EntityFrameworkCore.Cosmos.Storage.Internal
                     else
                     {
                         document = documentSource.CreateDocument(entry);
-
-                        // Set Discriminator Property for updates
-                        document[entityType.Cosmos().DiscriminatorProperty.Name] =
-                            JToken.FromObject(entityType.Cosmos().DiscriminatorValue);
                     }
 
                     return _cosmosClient.ReplaceDocument(collectionId, documentSource.GetId(entry), document);
@@ -199,7 +208,25 @@ namespace Microsoft.EntityFrameworkCore.Cosmos.Storage.Internal
         private IUpdateEntry GetRootDocument(InternalEntityEntry entry)
         {
             var stateManager = entry.StateManager;
-            var principal = stateManager.GetPrincipal(entry, entry.EntityType.FindOwnership());
+            var ownership = entry.EntityType.FindOwnership();
+            var principal = stateManager.GetPrincipal(entry, ownership);
+            if (principal == null)
+            {
+                if (_sensitiveLoggingEnabled)
+                {
+                    throw new InvalidOperationException(
+                        CosmosStrings.OrphanedNestedDocumentSensitive(
+                            entry.EntityType.DisplayName(),
+                            ownership.PrincipalEntityType.DisplayName(),
+                            entry.BuildCurrentValuesString(entry.EntityType.FindPrimaryKey().Properties)));
+                }
+
+                throw new InvalidOperationException(
+                    CosmosStrings.OrphanedNestedDocument(
+                        entry.EntityType.DisplayName(),
+                        ownership.PrincipalEntityType.DisplayName()));
+            }
+
             return principal.EntityType.IsDocumentRoot() ? principal : GetRootDocument(principal);
         }
     }
